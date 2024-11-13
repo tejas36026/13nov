@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Face Segmentation - Image Verification</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/body-pix"></script>
+    <style>
+        .image-canvas {
+            border: 1px solid #ccc;
+            margin: 5px;
+        }
+        .image-grid {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .image-wrapper {
+            margin: 10px;
+        }
+        .keypoints-label {
+            text-align: center;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <img id="sourceImage" src="5.jpg" crossorigin="anonymous" style="display: none;">
+    <div id="mainContainer"></div>
+
+<script>
+
+
+let net;
+const BODY_PARTS = {
+    'left_face': { name: 'Left Face', description: 'Left side of the face' },
+    'right_face': { name: 'Right Face', description: 'Right side of the face' },
+    'left_upper_arm_front': { name: 'Left Upper Arm (Front)', description: 'Front of left upper arm' },
+    'left_upper_arm_back': { name: 'Left Upper Arm (Back)', description: 'Back of left upper arm' },
+    'right_upper_arm_front': { name: 'Right Upper Arm (Front)', description: 'Front of right upper arm' },
+    'right_upper_arm_back': { name: 'Right Upper Arm (Back)', description: 'Back of right upper arm' },
+    'left_lower_arm_front': { name: 'Left Lower Arm (Front)', description: 'Front of left forearm' },
+    'left_lower_arm_back': { name: 'Left Lower Arm (Back)', description: 'Back of left forearm' },
+    'right_lower_arm_front': { name: 'Right Lower Arm (Front)', description: 'Front of right forearm' },
+    'right_lower_arm_back': { name: 'Right Lower Arm (Back)', description: 'Back of right forearm' },
+    'left_hand': { name: 'Left Hand', description: 'Left hand' },
+    'right_hand': { name: 'Right Hand', description: 'Right hand' },
+    'torso_front': { name: 'Torso Front', description: 'Front of the torso' },
+    'torso_back': { name: 'Torso Back', description: 'Back of the torso' },
+    'left_upper_leg_front': { name: 'Left Upper Leg (Front)', description: 'Front of left thigh' },
+    'left_upper_leg_back': { name: 'Left Upper Leg (Back)', description: 'Back of left thigh' },
+    'right_upper_leg_front': { name: 'Right Upper Leg (Front)', description: 'Front of right thigh' },
+    'right_upper_leg_back': { name: 'Right Upper Leg (Back)', description: 'Back of right thigh' },
+    'left_lower_leg_front': { name: 'Left Lower Leg (Front)', description: 'Front of left calf' },
+    'left_lower_leg_back': { name: 'Left Lower Leg (Back)', description: 'Back of left calf' },
+    'right_lower_leg_front': { name: 'Right Lower Leg (Front)', description: 'Front of right calf' },
+    'right_lower_leg_back': { name: 'Right Lower Leg (Back)', description: 'Back of right calf' },
+    'left_foot': { name: 'Left Foot', description: 'Left foot' },
+    'right_foot': { name: 'Right Foot', description: 'Right foot' },
+    'left_upper_foot': { name: 'Left Upper Foot', description: 'Upper part of left foot' },
+    'left_lower_foot': { name: 'Left Lower Foot', description: 'Lower part of left foot' },
+    'right_upper_foot': { name: 'Right Upper Foot', description: 'Upper part of right foot' },
+    'right_lower_foot': { name: 'Right Lower Foot', description: 'Lower part of right foot' }
+};
+
+const worker = new Worker('keypoints-worker.js');
+let collectedPoints = new Map();
+
+function processSegmentVariations(imageData, partName) {
+    return new Promise((resolve) => {
+        worker.postMessage({
+            imageData: imageData.data,
+            partName: partName,
+            width: imageData.width,
+            height: imageData.height
+        });
+
+        worker.onmessage = function(e) {
+            const { type, extremePoints, averages, partName } = e.data;
+
+            
+            const variations = [{
+                data: new Uint8ClampedArray(imageData.data),
+                extremePoints: extremePoints,
+                points: {}
+            }];
+
+            // Store points for averaging
+            if (!collectedPoints.has(partName)) {
+                collectedPoints.set(partName, []);
+            }
+            if (extremePoints && extremePoints.top) collectedPoints.get(partName).push(extremePoints.top);
+            if (extremePoints && extremePoints.bottom) collectedPoints.get(partName).push(extremePoints.bottom);
+            // Initialize points object
+            Object.keys(BODY_PARTS).forEach(part => {
+                variations[0].points[part] = {
+                    top: null,
+                    bottom: null
+                };
+            });
+            if (extremePoints) {
+                variations[0].points[partName] = {
+                    top: extremePoints.top,
+                    bottom: extremePoints.bottom
+                };
+            }
+            resolve(variations);
+        };
+    });
+}
+
+async function processImageWithOverlay() {
+    const img = document.getElementById('sourceImage');
+    const mainContainer = document.getElementById('mainContainer');
+    mainContainer.innerHTML = '';
+
+    const imageGrid = document.createElement('div');
+    imageGrid.className = 'image-grid';
+
+    const segmentation = await net.segmentPersonParts(img);
+
+    // Clear collected points before processing
+    collectedPoints.clear();
+
+    for (let partId = 0; partId < 24; partId++) {
+        const partName = Object.keys(BODY_PARTS)[partId];
+        if (!partName) continue;
+
+        const segmentCanvas = document.createElement('canvas');
+        segmentCanvas.width = img.width;
+        segmentCanvas.height = img.height;
+        const segmentCtx = segmentCanvas.getContext('2d');
+
+        segmentCtx.drawImage(img, 0, 0);
+
+        const imageData = segmentCtx.getImageData(0, 0, img.width, img.height);
+        for (let i = 0; i < segmentation.data.length; i++) {
+            const baseIdx = i * 4;
+            if (segmentation.data[i] !== partId) {
+                imageData.data[baseIdx + 3] = 0;
+            }
+        }
+
+        const variations = await processSegmentVariations(imageData, partName);
+
+        variations.forEach((variation, index) => {
+            if (!variation.data) return;
+
+            const pixelData = new Uint8ClampedArray(variation.data);
+            const variationCanvas = document.createElement('canvas');
+            variationCanvas.width = img.width;
+            variationCanvas.height = img.height;
+            const variationCtx = variationCanvas.getContext('2d');
+
+            const variationImageData = new ImageData(pixelData, img.width, img.height);
+            variationCtx.putImageData(variationImageData, 0, 0);
+
+            // Draw extreme keypoints
+            if (variation.extremePoints) {
+                // drawKeypoints(variationCtx, variation.extremePoints, '#00FF00', BODY_PARTS[partName].name);
+            }
+            const wrapper = document.createElement('div');
+            wrapper.className = 'image-wrapper';
+
+            const label = document.createElement('div');
+            label.className = 'keypoints-label';
+            label.textContent = BODY_PARTS[partName].name;
+
+            wrapper.appendChild(variationCanvas);
+            wrapper.appendChild(label);
+            imageGrid.appendChild(wrapper);
+        });
+    }
+
+    mainContainer.appendChild(imageGrid);
+    console.log('collectedPoints :>> ', collectedPoints);
+   
+    
+    // Convert from snake_case Map to camelCase object
+    const processedPoints = {};
+    
+
+const pointsToProcess = {
+    // Faces
+    leftFace: collectedPoints.get('left_face'),
+    rightFace: collectedPoints.get('right_face'),
+    
+    // Arms
+    leftUpperArmFront: collectedPoints.get('left_upper_arm_front'),
+    leftUpperArmBack: collectedPoints.get('left_upper_arm_back'),
+    leftLowerArmFront: collectedPoints.get('left_lower_arm_front'),
+    leftLowerArmBack: collectedPoints.get('left_lower_arm_back'),
+    leftHand: collectedPoints.get('left_hand'),
+    rightUpperArmFront: collectedPoints.get('right_upper_arm_front'),
+    rightUpperArmBack: collectedPoints.get('right_upper_arm_back'),
+    rightLowerArmFront: collectedPoints.get('right_lower_arm_front'),
+    rightLowerArmBack: collectedPoints.get('right_lower_arm_back'),
+    rightHand: collectedPoints.get('right_hand'),
+    
+    // Torso
+    torsoFront: collectedPoints.get('torso_front'),
+    torsoBack: collectedPoints.get('torso_back'),
+    
+    // Legs
+    leftUpperLegFront: collectedPoints.get('left_upper_leg_front'),
+    leftUpperLegBack: collectedPoints.get('left_upper_leg_back'),
+    leftLowerLegFront: collectedPoints.get('left_lower_leg_front'),
+    leftLowerLegBack: collectedPoints.get('left_lower_leg_back'),
+    rightUpperLegFront: collectedPoints.get('right_upper_leg_front'),
+    rightUpperLegBack: collectedPoints.get('right_upper_leg_back'),
+    rightLowerLegFront: collectedPoints.get('right_lower_leg_front'),
+    rightLowerLegBack: collectedPoints.get('right_lower_leg_back'),
+    
+    // Feet
+    leftFoot: collectedPoints.get('left_foot'),
+    rightFoot: collectedPoints.get('right_foot')
+};
+    console.log('pointsToProcess :>> ', pointsToProcess);
+}
+
+async function loadModels() {
+    try {
+        net = await bodyPix.load({
+            architecture: 'MobileNetV1',
+            outputStride: 16,
+            multiplier: 0.75,
+            quantBytes: 2
+        });
+    } catch (error) {
+        throw error;
+    }
+}
+
+
+document.getElementById('sourceImage').onload = async function() {
+    await loadModels();
+    await processImageWithOverlay();
+};
+
+
+
+</script>
+</body>
+</html>
